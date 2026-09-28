@@ -1,0 +1,2 @@
+FROM c:\Users\Whaoy\.trae-cn\work\6aba148a7f9d840e4b5cc612\gguf\Qwen3-8B-Q4_K_M.gguf
+PARAMETER num_ctx 32768
