@@ -7,7 +7,6 @@
 #include <icmpapi.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <string.h>
 
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -17,6 +16,23 @@
 #define NUM_CANDIDATES 5
 #define PING_TIMEOUT 2000
 #define MAX_ROUNDS 3
+
+#define ADAPTER_NAME L"以太网"
+#define IP0 10
+#define IP1 172
+#define IP2 201
+#define MASK0 255
+#define MASK1 255
+#define MASK2 254
+#define MASK3 0
+#define GW0 10
+#define GW1 172
+#define GW2 201
+#define GW3 254
+#define DNS0 10
+#define DNS1 1
+#define DNS2 0
+#define DNS3 62
 
 typedef struct {
     DWORD ip;
@@ -36,80 +52,6 @@ static DWORD WINAPI PingThread(LPVOID param) {
     free(buf);
     IcmpCloseHandle(h);
     return 0;
-}
-
-typedef struct {
-    WCHAR name[256];
-    char ipStr[32];
-    char maskStr[32];
-    char gwStr[32];
-    char dnsStr[32];
-    BOOL hasGateway;
-    BOOL hasDns;
-    BOOL found;
-} AdapterConfig;
-
-static void ParseIP4(const char *str, int *a, int *b, int *c, int *d) {
-    *a = *b = *c = *d = 0;
-    sscanf(str, "%d.%d.%d.%d", a, b, c, d);
-}
-
-static void ReadConfig(AdapterConfig *cfg) {
-    memset(cfg, 0, sizeof(*cfg));
-
-    ULONG outBufLen = 0;
-    if (GetAdaptersInfo(NULL, &outBufLen) != ERROR_BUFFER_OVERFLOW) return;
-    void *pBuf = malloc(outBufLen);
-    if (!pBuf) return;
-    if (GetAdaptersInfo((PIP_ADAPTER_INFO)pBuf, &outBufLen) != NO_ERROR) { free(pBuf); return; }
-
-    char targetGuid[256] = {0};
-    PIP_ADAPTER_INFO pInfo = (PIP_ADAPTER_INFO)pBuf;
-    while (pInfo) {
-        if (pInfo->Type != MIB_IF_TYPE_ETHERNET) { pInfo = pInfo->Next; continue; }
-        if (strstr(pInfo->Description, "VMware")) { pInfo = pInfo->Next; continue; }
-        if (strcmp(pInfo->IpAddressList.IpAddress.String, "0.0.0.0") == 0) { pInfo = pInfo->Next; continue; }
-
-        strcpy_s(cfg->ipStr, 32, pInfo->IpAddressList.IpAddress.String);
-        strcpy_s(cfg->maskStr, 32, pInfo->IpAddressList.IpMask.String);
-        strcpy_s(cfg->gwStr, 32, pInfo->GatewayList.IpAddress.String);
-        if (cfg->gwStr[0] && strcmp(cfg->gwStr, "0.0.0.0") != 0) cfg->hasGateway = TRUE;
-        strcpy_s(targetGuid, 256, pInfo->AdapterName);
-
-        ULONG perLen = 4096;
-        void *pPer = malloc(perLen);
-        if (pPer) {
-            if (GetPerAdapterInfo(pInfo->Index, (PIP_PER_ADAPTER_INFO)pPer, &perLen) == NO_ERROR) {
-                PIP_PER_ADAPTER_INFO ppi = (PIP_PER_ADAPTER_INFO)pPer;
-                if (ppi->DnsServerList.IpAddress.String[0] &&
-                    strcmp(ppi->DnsServerList.IpAddress.String, "0.0.0.0") != 0) {
-                    strcpy_s(cfg->dnsStr, 32, ppi->DnsServerList.IpAddress.String);
-                    cfg->hasDns = TRUE;
-                }
-            }
-            free(pPer);
-        }
-        break;
-    }
-    free(pBuf);
-
-    if (!cfg->ipStr[0]) return;
-
-    ULONG gaLen = 0;
-    if (GetAdaptersAddresses(AF_INET, 0, NULL, NULL, &gaLen) != ERROR_BUFFER_OVERFLOW) return;
-    void *pGa = malloc(gaLen);
-    if (!pGa) return;
-    if (GetAdaptersAddresses(AF_INET, 0, NULL, (PIP_ADAPTER_ADDRESSES)pGa, &gaLen) != NO_ERROR) { free(pGa); return; }
-    PIP_ADAPTER_ADDRESSES pAddr = (PIP_ADAPTER_ADDRESSES)pGa;
-    while (pAddr) {
-        if (strcmp(pAddr->AdapterName, targetGuid) == 0) {
-            wcscpy_s(cfg->name, 256, pAddr->FriendlyName);
-            cfg->found = TRUE;
-            break;
-        }
-        pAddr = pAddr->Next;
-    }
-    free(pGa);
 }
 
 static BOOL RunCommand(LPCWSTR cmd) {
@@ -135,25 +77,8 @@ static BOOL RunCommand(LPCWSTR cmd) {
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     srand(GetTickCount());
 
-    AdapterConfig cfg;
-    ReadConfig(&cfg);
-    if (!cfg.found) {
-        MessageBoxW(NULL, L"未找到活动的以太网适配器", L"自动设IP", MB_OK | MB_ICONERROR);
-        return 1;
-    }
-
-    int ip0, ip1, ip2, ip3;
-    ParseIP4(cfg.ipStr, &ip0, &ip1, &ip2, &ip3);
-    int m0, m1, m2, m3;
-    ParseIP4(cfg.maskStr, &m0, &m1, &m2, &m3);
-    int g0 = 0, g1 = 0, g2 = 0, g3 = 0;
-    if (cfg.hasGateway) ParseIP4(cfg.gwStr, &g0, &g1, &g2, &g3);
-    int d0 = 0, d1 = 0, d2 = 0, d3 = 0;
-    if (cfg.hasDns) ParseIP4(cfg.dnsStr, &d0, &d1, &d2, &d3);
-
     int used[256] = {0};
-    used[ip3] = 1;
-    used[g3] = 1;
+    used[GW3] = 1;
     used[0] = 1;
     used[255] = 1;
 
@@ -172,7 +97,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
             candidates[i] = last;
 
             char ipBuf[32];
-            sprintf(ipBuf, "%d.%d.%d.%d", ip0, ip1, ip2, last);
+            sprintf(ipBuf, "%d.%d.%d.%d", IP0, IP1, IP2, last);
             results[i].ip = inet_addr(ipBuf);
             results[i].reachable = TRUE;
             threads[i] = CreateThread(NULL, 0, PingThread, &results[i], 0, NULL);
@@ -207,33 +132,25 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     }
 
     WCHAR addrCmd[2048];
-    if (cfg.hasGateway) {
-        wsprintfW(addrCmd,
-            L"netsh interface ip set address name=\"%s\" source=static addr=%d.%d.%d.%d mask=%d.%d.%d.%d gateway=%d.%d.%d.%d gwmetric=1",
-            cfg.name, ip0, ip1, ip2, newLast, m0, m1, m2, m3, g0, g1, g2, g3);
-    } else {
-        wsprintfW(addrCmd,
-            L"netsh interface ip set address name=\"%s\" source=static addr=%d.%d.%d.%d mask=%d.%d.%d.%d",
-            cfg.name, ip0, ip1, ip2, newLast, m0, m1, m2, m3);
-    }
+    wsprintfW(addrCmd,
+        L"netsh interface ip set address name=\"%s\" source=static addr=%d.%d.%d.%d mask=%d.%d.%d.%d gateway=%d.%d.%d.%d gwmetric=1",
+        ADAPTER_NAME, IP0, IP1, IP2, newLast, MASK0, MASK1, MASK2, MASK3, GW0, GW1, GW2, GW3);
     BOOL ok = RunCommand(addrCmd);
 
-    if (cfg.hasDns) {
-        WCHAR dnsCmd[512];
-        wsprintfW(dnsCmd,
-            L"netsh interface ip set dns name=\"%s\" source=static addr=%d.%d.%d.%d register=primary",
-            cfg.name, d0, d1, d2, d3);
-        RunCommand(dnsCmd);
-    }
+    WCHAR dnsCmd[512];
+    wsprintfW(dnsCmd,
+        L"netsh interface ip set dns name=\"%s\" source=static addr=%d.%d.%d.%d register=primary",
+        ADAPTER_NAME, DNS0, DNS1, DNS2, DNS3);
+    RunCommand(dnsCmd);
 
     WCHAR msg[1024];
     if (ok) {
-        wsprintfW(msg, L"IP已更新\n\n旧IP: %d.%d.%d.%d\n新IP: %d.%d.%d.%d\n掩码: %d.%d.%d.%d\n网关: %d.%d.%d.%d\nDNS: %d.%d.%d.%d",
-            ip0, ip1, ip2, ip3, ip0, ip1, ip2, newLast,
-            m0, m1, m2, m3, g0, g1, g2, g3, d0, d1, d2, d3);
+        wsprintfW(msg, L"IP已更新\n\n新IP: %d.%d.%d.%d\n掩码: %d.%d.%d.%d\n网关: %d.%d.%d.%d\nDNS: %d.%d.%d.%d",
+            IP0, IP1, IP2, newLast, MASK0, MASK1, MASK2, MASK3,
+            GW0, GW1, GW2, GW3, DNS0, DNS1, DNS2, DNS3);
         MessageBoxW(NULL, msg, L"自动设IP - 成功", MB_OK | MB_ICONINFORMATION);
     } else {
-        wsprintfW(msg, L"设置IP失败\n\n目标IP: %d.%d.%d.%d", ip0, ip1, ip2, newLast);
+        wsprintfW(msg, L"设置IP失败\n\n目标IP: %d.%d.%d.%d", IP0, IP1, IP2, newLast);
         MessageBoxW(NULL, msg, L"自动设IP - 失败", MB_OK | MB_ICONERROR);
     }
     return 0;
