@@ -62,6 +62,13 @@ bool PingWorker::pingIp(DWORD ip, int count, int timeoutMs, int intervalMs, int 
     return replies > 0;
 }
 
+void PingWorker::answer(bool keep) {
+    QMutexLocker locker(&m_mutex);
+    m_keep = keep;
+    m_waiting = false;
+    m_cond.wakeAll();
+}
+
 bool PingWorker::runNetsh(const QString &cmd) {
     QProcess proc;
     proc.setProgram("netsh");
@@ -231,7 +238,33 @@ void PingWorker::run() {
             finalLast = tryLast;
             emit logMessage(">> 验证通过! IP稳定可用", "#4ade80");
         } else {
-            emit logMessage(">> 有丢包, 换下一个", "#f87171");
+            QString ipStr = QString("%1.%2.%3.%4").arg(IP0).arg(IP1).arg(IP2).arg(tryLast);
+            emit logMessage(QString(">> 有丢包 (丢失 %1 个包), 等待你的选择...").arg(VERIFY_COUNT - replies), "#fbbf24");
+            emit progress(95, QString("等待选择: 继续使用 %1 或换一个").arg(ipStr));
+
+            {
+                QMutexLocker locker(&m_mutex);
+                m_waiting = true;
+                m_keep = false;
+            }
+            emit askUser(ipStr, replies, VERIFY_COUNT);
+
+            bool keep = false;
+            {
+                QMutexLocker locker(&m_mutex);
+                while (m_waiting && !m_cancelled) {
+                    m_cond.wait(&m_mutex, 200);
+                }
+                keep = m_keep;
+            }
+
+            if (keep) {
+                success = true;
+                finalLast = tryLast;
+                emit logMessage(">> 已按你的选择继续使用该IP (存在丢包)", "#fbbf24");
+            } else {
+                emit logMessage(">> 已按你的选择换下一个IP", "#f87171");
+            }
         }
     }
 

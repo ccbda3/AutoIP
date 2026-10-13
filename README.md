@@ -12,7 +12,7 @@
 - 每个地址并发 ping 5 个包，有响应即判定被占用
 - 从扫描出的空闲地址中随机挑一个，通过 `netsh` 设置为静态 IP
 - 设置完成后 ping 百度 5 个包验证网络稳定性
-- 如果有丢包，自动换下一个空闲地址重试
+- 如果有丢包，弹窗询问你「继续使用此 IP」还是「换一个 IP」，由你决定，不再强制切换
 - 双击运行自动申请管理员权限，无黑色 cmd 窗口
 - 深色 UI，渐变进度条，实时彩色日志
 
@@ -42,7 +42,7 @@
 AutoIPQt/
   main.cpp          程序入口、UAC 管理员提权
   mainwindow.cpp/h  主窗口、日志区、进度条
-  pingworker.cpp/h  扫描线程：ARP + ping 探测、netsh 设置、百度验证
+  pingworker.cpp/h  扫描线程：全段并发 ping 探测、netsh 设置、百度验证、丢包交互询问
   CMakeLists.txt    构建脚本（含 UAC 清单）
   autoip.qrc        图标资源
   autoip.rc         图标引用

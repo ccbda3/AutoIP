@@ -6,6 +6,8 @@
 #include <QFontDatabase>
 #include <QFile>
 #include <QScrollBar>
+#include <QMessageBox>
+#include <QAbstractButton>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), m_worker(nullptr), m_done(false)
@@ -21,6 +23,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(m_worker, &PingWorker::logMessage, this, &MainWindow::onLogMessage, Qt::QueuedConnection);
     connect(m_worker, &PingWorker::progress, this, &MainWindow::onProgress, Qt::QueuedConnection);
+    connect(m_worker, &PingWorker::askUser, this, &MainWindow::onAskUser, Qt::QueuedConnection);
     connect(m_worker, &PingWorker::done, this, &MainWindow::onDone, Qt::QueuedConnection);
 
     startWork();
@@ -188,6 +191,25 @@ void MainWindow::onLogMessage(const QString &msg, const QString &color) {
 void MainWindow::onProgress(int value, const QString &status) {
     m_progress->setValue(value);
     m_statusLabel->setText(status);
+}
+
+void MainWindow::onAskUser(const QString &ip, int replies, int total) {
+    m_statusLabel->setText(QString("等待选择: %1").arg(ip));
+
+    QMessageBox box(this);
+    box.setWindowTitle("验证有丢包");
+    box.setIcon(QMessageBox::Question);
+    box.setText(QString("IP %1 ping百度只收到 %2/%3 个包，存在丢包。").arg(ip).arg(replies).arg(total));
+    box.setInformativeText("要继续使用这个IP，还是换一个？");
+
+    QAbstractButton *keepBtn = box.addButton("继续使用此IP", QMessageBox::AcceptRole);
+    QAbstractButton *switchBtn = box.addButton("换一个IP", QMessageBox::RejectRole);
+    box.setDefaultButton(static_cast<QPushButton*>(switchBtn));
+    box.exec();
+
+    bool keep = (box.clickedButton() == keepBtn);
+    m_worker->answer(keep);
+    m_statusLabel->setText(keep ? "继续使用当前IP" : "继续寻找可用IP");
 }
 
 void MainWindow::onDone(bool success) {

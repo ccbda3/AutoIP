@@ -21,6 +21,7 @@ protected:
 private slots:
     void onLogMessage(const QString &msg, const QString &color);
     void onProgress(int value, const QString &status);
+    void onAskUser(const QString &ip, int replies, int total);
     void onDone(bool success);
 
 private:
