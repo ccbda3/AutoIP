@@ -16,14 +16,14 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(linker, "/SUBSYSTEM:WINDOWS")
 
-#define NUM_CANDIDATES 5
+#define SCAN_FIRST 1
+#define SCAN_LAST 253
 #define PING_COUNT 5
 #define PING_TIMEOUT 2000
 #define PING_INTERVAL 500
 #define VERIFY_COUNT 10
 #define VERIFY_TIMEOUT 3000
 #define VERIFY_INTERVAL 1000
-#define MAX_ROUNDS 3
 
 #define ADAPTER_NAME L"以太网"
 #define IP0 10
@@ -170,111 +170,113 @@ static DWORD WINAPI WorkerThread(LPVOID param) {
 
     srand(GetTickCount());
 
-    int used[256] = {0};
-    used[GW3] = 1;
-    used[0] = 1;
-    used[255] = 1;
+    int total = SCAN_LAST - SCAN_FIRST + 1;
+    PingResult *results = (PingResult *)malloc(sizeof(PingResult) * total);
+    HANDLE *threads = (HANDLE *)malloc(sizeof(HANDLE) * total);
+    if (!results || !threads) {
+        AppendLog(L"*** 内存不足 ***\r\n");
+        PostMessageW(hwndMain, WM_WORKDONE, 0, 1);
+        return 1;
+    }
+
+    AppendLog(L"并发扫描 %d.%d.%d.%d - %d.%d.%d.%d (共%d个地址)...\r\n\r\n",
+        IP0, IP1, IP2, SCAN_FIRST, IP0, IP1, IP2, SCAN_LAST, total);
+
+    for (int i = 0; i < total; i++) {
+        int last = SCAN_FIRST + i;
+        char ipBuf[32];
+        sprintf(ipBuf, "%d.%d.%d.%d", IP0, IP1, IP2, last);
+        results[i].ip = inet_addr(ipBuf);
+        results[i].reachable = TRUE;
+        results[i].replyCount = 0;
+        results[i].arpAlive = 0;
+        results[i].lastOctet = last;
+        threads[i] = CreateThread(NULL, 0, PingThread, &results[i], 0, NULL);
+        if (!threads[i]) results[i].reachable = TRUE;
+    }
+
+    for (int i = 0; i < total; i++) {
+        if (threads[i]) {
+            WaitForSingleObject(threads[i], 60000);
+            CloseHandle(threads[i]);
+        }
+    }
+
+    int occupied = 0;
+    int freeCount = 0;
+    for (int i = 0; i < total; i++) {
+        if (results[i].reachable) occupied++;
+        else freeCount++;
+    }
+    AppendLog(L"扫描完成: 共%d个地址, 被占用 %d 个, 空闲 %d 个\r\n", total, occupied, freeCount);
+
+    if (freeCount <= 0) {
+        AppendLog(L"\r\n*** 全段地址均被占用, 请稍后重试 ***\r\n");
+        free(results);
+        free(threads);
+        PostMessageW(hwndMain, WM_WORKDONE, 0, 1);
+        return 1;
+    }
+
+    int *freeList = (int *)malloc(sizeof(int) * freeCount);
+    if (!freeList) {
+        AppendLog(L"*** 内存不足 ***\r\n");
+        free(results);
+        free(threads);
+        PostMessageW(hwndMain, WM_WORKDONE, 0, 1);
+        return 1;
+    }
+
+    int fc = 0;
+    for (int i = 0; i < total; i++) {
+        if (!results[i].reachable) freeList[fc++] = results[i].lastOctet;
+    }
+
+    int show = fc < 40 ? fc : 40;
+    AppendLog(L"空闲地址(前%d个): ", show);
+    for (int i = 0; i < show; i++) {
+        AppendLog(L"%d.%d.%d.%d  ", IP0, IP1, IP2, freeList[i]);
+    }
+    AppendLog(L"\r\n\r\n");
+
+    for (int i = fc - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        int t = freeList[i]; freeList[i] = freeList[j]; freeList[j] = t;
+    }
 
     BOOL success = FALSE;
     int finalLast = 0;
 
-    for (int round = 0; round < MAX_ROUNDS && !success; round++) {
-        AppendLog(L"[第%d轮] 随机生成5个候选IP:\r\n", round + 1);
+    for (int idx = 0; idx < fc && !success; idx++) {
+        int tryLast = freeList[idx];
+        AppendLog(L">> 尝试IP: %d.%d.%d.%d\r\n", IP0, IP1, IP2, tryLast);
 
-        PingResult results[NUM_CANDIDATES];
-        HANDLE threads[NUM_CANDIDATES];
-        int candidates[NUM_CANDIDATES];
-
-        for (int i = 0; i < NUM_CANDIDATES; i++) {
-            int last;
-            do { last = 1 + rand() % 253; } while (used[last]);
-            used[last] = 1;
-            candidates[i] = last;
-
-            char ipBuf[32];
-            sprintf(ipBuf, "%d.%d.%d.%d", IP0, IP1, IP2, last);
-            results[i].ip = inet_addr(ipBuf);
-            results[i].reachable = TRUE;
-            results[i].replyCount = 0;
-            results[i].arpAlive = 0;
-            results[i].lastOctet = last;
-            threads[i] = CreateThread(NULL, 0, PingThread, &results[i], 0, NULL);
-            if (!threads[i]) results[i].reachable = TRUE;
-
-            AppendLog(L"  候选%d: %d.%d.%d.%d\r\n", i + 1, IP0, IP1, IP2, last);
+        AppendLog(L"正在执行 netsh 设置IP...\r\n");
+        if (!SetIP(tryLast)) {
+            AppendLog(L"设置失败, 换下一个\r\n\r\n");
+            continue;
         }
 
-        AppendLog(L"\r\n正在并发探测 (ARP + 每个IP发%d包, 间隔%dms, 超时%dms)...\r\n\r\n", PING_COUNT, PING_INTERVAL, PING_TIMEOUT);
+        AppendLog(L"等待网络生效 (3秒)...\r\n");
+        Sleep(3000);
 
-        int vc = 0;
-        HANDLE vh[NUM_CANDIDATES];
-        for (int i = 0; i < NUM_CANDIDATES; i++) {
-            if (threads[i]) vh[vc++] = threads[i];
-        }
-        if (vc > 0) WaitForMultipleObjects(vc, vh, TRUE, 60000);
-        for (int i = 0; i < NUM_CANDIDATES; i++) {
-            if (threads[i]) CloseHandle(threads[i]);
-        }
+        AppendLog(L"验证稳定性: ping百度 %d 包...\r\n", VERIFY_COUNT);
+        int replies = 0;
+        VerifyBaidu(&replies);
+        AppendLog(L"百度验证结果: 收到 %d/%d\r\n", replies, VERIFY_COUNT);
 
-        AppendLog(L"探测结果:\r\n");
-        for (int i = 0; i < NUM_CANDIDATES; i++) {
-            AppendLog(L"  %d.%d.%d.%d -> ARP:%s  Ping:%d/%d  %s\r\n",
-                IP0, IP1, IP2, candidates[i],
-                results[i].arpAlive ? L"有应答" : L"无应答",
-                results[i].replyCount, PING_COUNT,
-                results[i].reachable ? L"(被占用)" : L"(空闲)");
-        }
-
-        int unreach[NUM_CANDIDATES];
-        int uc = 0;
-        for (int i = 0; i < NUM_CANDIDATES; i++) {
-            if (!results[i].reachable) unreach[uc++] = i;
-        }
-
-        if (uc > 0) {
-            int order[NUM_CANDIDATES];
-            for (int i = 0; i < uc; i++) order[i] = i;
-            for (int i = uc - 1; i > 0; i--) {
-                int j = rand() % (i + 1);
-                int t = order[i]; order[i] = order[j]; order[j] = t;
-            }
-
-            for (int idx = 0; idx < uc && !success; idx++) {
-                int pick = unreach[order[idx]];
-                int tryLast = candidates[pick];
-                AppendLog(L"\r\n>> 尝试IP: %d.%d.%d.%d\r\n", IP0, IP1, IP2, tryLast);
-
-                AppendLog(L"正在执行 netsh 设置IP...\r\n");
-                if (!SetIP(tryLast)) {
-                    AppendLog(L"设置失败, 换下一个\r\n");
-                    continue;
-                }
-
-                AppendLog(L"\r\n等待网络生效 (3秒)...\r\n");
-                Sleep(3000);
-
-                AppendLog(L"验证稳定性: ping百度 %d 包...\r\n", VERIFY_COUNT);
-                int replies = 0;
-                VerifyBaidu(&replies);
-                AppendLog(L"百度验证结果: 收到 %d/%d\r\n", replies, VERIFY_COUNT);
-
-                if (replies == VERIFY_COUNT) {
-                    success = TRUE;
-                    finalLast = tryLast;
-                    AppendLog(L">> 验证通过! IP稳定可用\r\n");
-                } else {
-                    AppendLog(L">> 有丢包, 放弃此IP, 换下一个\r\n");
-                    used[tryLast] = 1;
-                }
-            }
-
-            if (!success) {
-                AppendLog(L"\r\n本轮空闲IP均不稳定, 继续下一轮...\r\n\r\n");
-            }
+        if (replies == VERIFY_COUNT) {
+            success = TRUE;
+            finalLast = tryLast;
+            AppendLog(L">> 验证通过! IP稳定可用\r\n");
         } else {
-            AppendLog(L"\r\n本轮5个IP全部被占用, 继续下一轮...\r\n\r\n");
+            AppendLog(L">> 有丢包, 换下一个\r\n\r\n");
         }
     }
+
+    free(freeList);
+    free(results);
+    free(threads);
 
     if (!success) {
         AppendLog(L"\r\n*** 未能找到稳定可用IP, 请重试 ***\r\n");

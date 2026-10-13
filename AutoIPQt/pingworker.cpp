@@ -10,18 +10,20 @@
 #include <QByteArray>
 #include <QStringList>
 #include <QRandomGenerator>
+#include <QVector>
+#include <vector>
 
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
-#define NUM_CANDIDATES 5
+#define SCAN_FIRST 1
+#define SCAN_LAST 253
 #define PING_COUNT 5
 #define PING_TIMEOUT 2000
 #define PING_INTERVAL 500
 #define VERIFY_COUNT 10
 #define VERIFY_TIMEOUT 3000
 #define VERIFY_INTERVAL 1000
-#define MAX_ROUNDS 3
 
 static const char *ADAPTER_NAME = "以太网";
 static const int IP0 = 10, IP1 = 172, IP2 = 201;
@@ -122,128 +124,119 @@ void PingWorker::run() {
     emit logMessage(QString("验证: ping百度%1包, 全通才算成功").arg(VERIFY_COUNT), "#a0a0a0");
     emit logMessage("", "#a0a0a0");
 
-    int used[256] = {0};
-    used[GW3] = 1;
-    used[0] = 1;
-    used[255] = 1;
+    struct Cand { DWORD ip; int last; bool reachable; int replies; bool arpAlive; };
+    const int total = SCAN_LAST - SCAN_FIRST + 1;
+    std::vector<Cand> cands(total);
+
+    emit progress(10, "并发扫描地址中...");
+    emit logMessage(QString("并发扫描 %1.%2.%3.%4 - %5.%6.%7.%8 (共%9个地址)...")
+        .arg(IP0).arg(IP1).arg(IP2).arg(SCAN_FIRST)
+        .arg(IP0).arg(IP1).arg(IP2).arg(SCAN_LAST)
+        .arg(total), "#fbbf24");
+
+    for (int i = 0; i < total; i++) {
+        int last = SCAN_FIRST + i;
+        char ipBuf[32];
+        sprintf(ipBuf, "%d.%d.%d.%d", IP0, IP1, IP2, last);
+        cands[i].ip = inet_addr(ipBuf);
+        cands[i].last = last;
+        cands[i].reachable = true;
+        cands[i].replies = 0;
+        cands[i].arpAlive = false;
+    }
+
+    QList<QThread*> threads;
+    for (int i = 0; i < total; i++) {
+        auto t = QThread::create([&cands, i]() {
+            ULONG mac[2] = {0, 0};
+            ULONG macLen = 6;
+            cands[i].arpAlive = (SendARP(cands[i].ip, 0, mac, &macLen) == NO_ERROR);
+            if (cands[i].arpAlive) { cands[i].reachable = true; cands[i].replies = 0; return; }
+            HANDLE h = IcmpCreateFile();
+            if (h == INVALID_HANDLE_VALUE) { cands[i].reachable = true; cands[i].replies = PING_COUNT; return; }
+            unsigned char data[32] = {0};
+            DWORD replySize = sizeof(ICMP_ECHO_REPLY) + sizeof(data) + 8;
+            void *buf = malloc(replySize);
+            if (!buf) { IcmpCloseHandle(h); cands[i].reachable = true; cands[i].replies = PING_COUNT; return; }
+            int replies = 0;
+            for (int j = 0; j < PING_COUNT; j++) {
+                DWORD ret = IcmpSendEcho(h, cands[i].ip, data, sizeof(data), NULL, buf, replySize, PING_TIMEOUT);
+                if (ret > 0) replies++;
+                if (j < PING_COUNT - 1) Sleep(PING_INTERVAL);
+            }
+            cands[i].replies = replies;
+            cands[i].reachable = (replies > 0);
+            free(buf);
+            IcmpCloseHandle(h);
+        });
+        threads.append(t);
+        t->start();
+    }
+    for (auto *t : threads) { t->wait(120000); delete t; }
+
+    int occupied = 0;
+    QVector<int> freeLasts;
+    for (int i = 0; i < total; i++) {
+        if (cands[i].reachable) occupied++;
+        else freeLasts.append(cands[i].last);
+    }
+
+    emit progress(65, "扫描完成");
+    emit logMessage(QString("扫描完成: 共%1个地址, 被占用 %2 个, 空闲 %3 个")
+        .arg(total).arg(occupied).arg(freeLasts.size()), "#a0a0a0");
+
+    if (freeLasts.isEmpty()) {
+        emit logMessage("\n*** 全段地址均被占用, 请稍后重试 ***", "#f87171");
+        emit progress(100, "失败");
+        emit done(false);
+        return;
+    }
+
+    QStringList listed;
+    int show = freeLasts.size() < 40 ? freeLasts.size() : 40;
+    for (int i = 0; i < show; i++)
+        listed << QString("%1.%2.%3.%4").arg(IP0).arg(IP1).arg(IP2).arg(freeLasts[i]);
+    emit logMessage(QString("空闲地址(前%1个): %2").arg(show).arg(listed.join("  ")), "#4ade80");
+    emit logMessage("", "#a0a0a0");
+
+    for (int i = freeLasts.size() - 1; i > 0; i--) {
+        int j = QRandomGenerator::global()->bounded(i + 1);
+        int tmp = freeLasts[i];
+        freeLasts[i] = freeLasts[j];
+        freeLasts[j] = tmp;
+    }
 
     bool success = false;
     int finalLast = 0;
 
-    for (int round = 0; round < MAX_ROUNDS && !success; round++) {
+    for (int idx = 0; idx < freeLasts.size() && !success; idx++) {
         if (m_cancelled) break;
-        emit progress(round * 20, QString("第%1轮").arg(round + 1));
-        emit logMessage(QString("[第%1轮] 随机生成5个候选IP:").arg(round + 1), "#fbbf24");
+        int tryLast = freeLasts[idx];
+        emit logMessage(QString("\n>> 尝试IP: %1.%2.%3.%4").arg(IP0).arg(IP1).arg(IP2).arg(tryLast), "#60a5fa");
+        emit progress(70, QString("设置IP %1.%2.%3.%4").arg(IP0).arg(IP1).arg(IP2).arg(tryLast));
 
-        struct Cand { DWORD ip; int last; bool reachable; int replies; bool arpAlive; };
-        Cand cands[NUM_CANDIDATES];
-        QList<int> candidates;
-
-        for (int i = 0; i < NUM_CANDIDATES; i++) {
-            int last;
-            do { last = 1 + QRandomGenerator::global()->bounded(253); } while (used[last]);
-            used[last] = 1;
-            candidates.append(last);
-
-            char ipBuf[32];
-            sprintf(ipBuf, "%d.%d.%d.%d", IP0, IP1, IP2, last);
-            cands[i].ip = inet_addr(ipBuf);
-            cands[i].last = last;
-            cands[i].reachable = true;
-            cands[i].replies = 0;
-            cands[i].arpAlive = false;
-
-            emit logMessage(QString("  候选%1: %2.%3.%4.%5").arg(i + 1).arg(IP0).arg(IP1).arg(IP2).arg(last), "#a0a0a0");
-        }
-
-        emit logMessage(QString("\n正在并发探测 (ARP + 每个IP发%1包, 间隔%2ms, 超时%3ms)...").arg(PING_COUNT).arg(PING_INTERVAL).arg(PING_TIMEOUT), "#a0a0a0");
-        emit progress(round * 20 + 5, "探测候选IP...");
-
-        QList<QThread*> threads;
-        struct PingArg { Cand *c; bool *cancelled; };
-        for (int i = 0; i < NUM_CANDIDATES; i++) {
-            auto t = QThread::create([&, i]() {
-                ULONG mac[2] = {0, 0};
-                ULONG macLen = 6;
-                cands[i].arpAlive = (SendARP(cands[i].ip, 0, mac, &macLen) == NO_ERROR);
-                if (cands[i].arpAlive) { cands[i].reachable = true; cands[i].replies = 0; return; }
-                HANDLE h = IcmpCreateFile();
-                if (h == INVALID_HANDLE_VALUE) { cands[i].reachable = true; cands[i].replies = PING_COUNT; return; }
-                unsigned char data[32] = {0};
-                DWORD replySize = sizeof(ICMP_ECHO_REPLY) + sizeof(data) + 8;
-                void *buf = malloc(replySize);
-                if (!buf) { IcmpCloseHandle(h); cands[i].reachable = true; cands[i].replies = PING_COUNT; return; }
-                int replies = 0;
-                for (int j = 0; j < PING_COUNT; j++) {
-                    DWORD ret = IcmpSendEcho(h, cands[i].ip, data, sizeof(data), NULL, buf, replySize, PING_TIMEOUT);
-                    if (ret > 0) replies++;
-                    if (j < PING_COUNT - 1) Sleep(PING_INTERVAL);
-                }
-                cands[i].replies = replies;
-                cands[i].reachable = (replies > 0);
-                free(buf);
-                IcmpCloseHandle(h);
-            });
-            threads.append(t);
-            t->start();
-        }
-        for (auto *t : threads) { t->wait(60000); delete t; }
-
-        emit logMessage("探测结果:", "#a0a0a0");
-        for (int i = 0; i < NUM_CANDIDATES; i++) {
-            QString status = cands[i].reachable ? "(被占用)" : "(空闲)";
-            QString color = cands[i].reachable ? "#f87171" : "#4ade80";
-            emit logMessage(QString("  %1.%2.%3.%4 -> ARP:%5  Ping:%6/%7  %8")
-                .arg(IP0).arg(IP1).arg(IP2).arg(cands[i].last)
-                .arg(cands[i].arpAlive ? "有应答" : "无应答")
-                .arg(cands[i].replies).arg(PING_COUNT).arg(status), color);
-        }
-
-        QList<int> freeCands;
-        for (int i = 0; i < NUM_CANDIDATES; i++) {
-            if (!cands[i].reachable) freeCands.append(i);
-        }
-
-        if (freeCands.isEmpty()) {
-            emit logMessage("\n本轮5个IP全部被占用, 继续下一轮...", "#fbbf24");
+        if (!setIP(tryLast)) {
+            emit logMessage("设置失败, 换下一个", "#f87171");
             continue;
         }
 
-        for (int idx = 0; idx < freeCands.size() && !success; idx++) {
+        emit logMessage("等待网络生效 (3秒)...", "#a0a0a0");
+        for (int s = 0; s < 3; s++) {
             if (m_cancelled) break;
-            int pick = freeCands[idx];
-            int tryLast = cands[pick].last;
-            emit logMessage(QString("\n>> 尝试IP: %1.%2.%3.%4").arg(IP0).arg(IP1).arg(IP2).arg(tryLast), "#60a5fa");
-            emit progress(round * 20 + 30, QString("设置IP %1.%2.%3.%4").arg(IP0).arg(IP1).arg(IP2).arg(tryLast));
-
-            if (!setIP(tryLast)) {
-                emit logMessage("设置失败, 换下一个", "#f87171");
-                continue;
-            }
-
-            emit logMessage("等待网络生效 (3秒)...", "#a0a0a0");
-            for (int s = 0; s < 3; s++) {
-                if (m_cancelled) break;
-                Sleep(1000);
-            }
-
-            emit logMessage(QString("验证稳定性: ping百度 %1 包...").arg(VERIFY_COUNT), "#fbbf24");
-            int replies = verifyBaidu();
-            emit logMessage(QString("百度验证结果: 收到 %1/%2").arg(replies).arg(VERIFY_COUNT),
-                            replies == VERIFY_COUNT ? "#4ade80" : "#f87171");
-
-            if (replies == VERIFY_COUNT) {
-                success = true;
-                finalLast = tryLast;
-                emit logMessage(">> 验证通过! IP稳定可用", "#4ade80");
-            } else {
-                emit logMessage(">> 有丢包, 放弃此IP, 换下一个", "#f87171");
-                used[tryLast] = 1;
-            }
+            Sleep(1000);
         }
 
-        if (!success) {
-            emit logMessage("\n本轮空闲IP均不稳定, 继续下一轮...", "#fbbf24");
+        emit logMessage(QString("验证稳定性: ping百度 %1 包...").arg(VERIFY_COUNT), "#fbbf24");
+        int replies = verifyBaidu();
+        emit logMessage(QString("百度验证结果: 收到 %1/%2").arg(replies).arg(VERIFY_COUNT),
+                        replies == VERIFY_COUNT ? "#4ade80" : "#f87171");
+
+        if (replies == VERIFY_COUNT) {
+            success = true;
+            finalLast = tryLast;
+            emit logMessage(">> 验证通过! IP稳定可用", "#4ade80");
+        } else {
+            emit logMessage(">> 有丢包, 换下一个", "#f87171");
         }
     }
 
