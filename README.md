@@ -1,6 +1,10 @@
 # AutoIP
 
-延安职业技术学院专用 - 自动检测并设置空闲 IP 地址的 Windows 工具。专为教室/实验室等多人共用网段、IP 容易冲突的场景设计。
+延安职业技术学院专用 —— 自动检测并设置空闲 IP 地址的 Windows 工具。专为教室/实验室等多人共用网段、IP 容易冲突且需要手动配静态 IP 的场景设计。
+
+![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)
+![Qt](https://img.shields.io/badge/Qt-6.9-green)
+![license](https://img.shields.io/badge/license-MIT-orange)
 
 ## 功能
 
@@ -10,7 +14,7 @@
 - 设置完成后 ping 百度 10 个包验证网络稳定性
 - 如果有丢包，自动换下一个空闲地址重试
 - 双击运行自动申请管理员权限，无黑色 cmd 窗口
-- 实时日志窗口显示完整操作过程
+- 深色 UI，渐变进度条，实时彩色日志
 
 ## 检测原理
 
@@ -25,7 +29,7 @@
 
 任一有响应即视为「被占用」，全部无响应才判为空闲。ARP 需要与目标在同一广播域，本工具适用于同一网段。
 
-扫描范围由 `autoip.c` / `AutoIPQt/pingworker.cpp` 里的 `SCAN_FIRST`、`SCAN_LAST` 控制，共 253 个地址一次性并发探测，占用率高的教室网段也能立刻拿到完整空闲列表。
+扫描范围由 `AutoIPQt/pingworker.cpp` 里的 `SCAN_FIRST`、`SCAN_LAST` 控制，共 253 个地址一次性并发探测，占用率高的教室网段也能立刻拿到完整空闲列表。
 
 ## 网络配置（写死在源码中）
 
@@ -37,58 +41,43 @@
 | 网关 | 10.172.201.254 |
 | DNS | 10.1.0.62 |
 
-修改 `autoip.c` 顶部的 `#define` 即可适配你的网络。
+修改 `AutoIPQt/pingworker.cpp` 顶部的常量即可适配你的网络。
 
-## 两个版本
-
-### 纯 C 版（单文件 exe）
-
-```
-autoip.c          主程序源码
-autoip.rc         资源文件（嵌入图标）
-autoip.ico        应用图标
-autoip.manifest   UAC 管理员提权清单
-```
-
-编译：
-```bash
-rc /fo autoip.res autoip.rc
-cl autoip.c autoip.res /Fe:AutoIP.exe /O2 /MT /utf-8
-```
-
-输出单个 `AutoIP.exe`，无需任何依赖。
-
-### Qt 版（美化 UI）
+## 源码结构
 
 ```
 AutoIPQt/
-  main.cpp
-  mainwindow.cpp / mainwindow.h
-  pingworker.cpp / pingworker.h
-  CMakeLists.txt
-  autoip.qrc / autoip.rc / autoip.ico
+  main.cpp          程序入口、UAC 管理员提权
+  mainwindow.cpp/h  主窗口、日志区、进度条
+  pingworker.cpp/h  扫描线程：ARP + ping 探测、netsh 设置、百度验证
+  CMakeLists.txt    构建脚本（含 UAC 清单）
+  autoip.qrc        图标资源
+  autoip.rc         图标引用
+  autoip.ico        应用图标
 ```
 
-编译：
+## 编译
+
+环境要求：Qt 6.x（msvc2022_64）+ Visual Studio 2022 以上。
+
 ```bash
-cmake -B build -G "Visual Studio 18 2026" -A x64 -DCMAKE_PREFIX_PATH=C:/Qt/6.9.3/msvc2022_64
-cmake --build build --config Release
+cmake -B AutoIPQt/build -G "Visual Studio 18 2026" -A x64 \
+      -DCMAKE_PREFIX_PATH=C:/Qt/6.9.3/msvc2022_64 AutoIPQt
+cmake --build AutoIPQt/build --config Release
 ```
 
-需要 Qt 6.x + MSVC 2022+。运行时需搭配 `windeployqt` 部署 DLL。
+产物：`AutoIPQt/build/Release/AutoIP.exe`
 
-## 截图
+## 部署
 
-纯 C 版界面：
-- Win32 原生控件，Consolas 等宽字体日志
-- 彩色输出（绿色=成功，红色=失败，黄色=警告）
+程序依赖 Qt 运行库，需用 `windeployqt` 把 DLL 复制到 exe 同级目录：
 
-Qt 版界面：
-- 深色主题（#1a1a2e）
-- 渐变进度条（蓝→紫）
-- 顶部信息卡片
-- 彩色 HTML 富文本日志
+```bash
+windeployqt --release --no-translations --no-opengl-sw AutoIP.exe
+```
+
+双击运行时会自动弹出 UAC 申请管理员权限（`netsh` 改 IP 需要）。
 
 ## 许可证
 
-MIT License
+MIT License，详见 [LICENSE](LICENSE)
