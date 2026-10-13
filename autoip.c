@@ -57,11 +57,20 @@ typedef struct {
     DWORD ip;
     BOOL reachable;
     int replyCount;
+    int arpAlive;
     int lastOctet;
 } PingResult;
 
+static int ArpProbe(DWORD ip) {
+    ULONG mac[2] = {0, 0};
+    ULONG macLen = 6;
+    return (SendARP(ip, 0, mac, &macLen) == NO_ERROR) ? 1 : 0;
+}
+
 static DWORD WINAPI PingThread(LPVOID param) {
     PingResult *r = (PingResult *)param;
+    r->arpAlive = ArpProbe(r->ip);
+    if (r->arpAlive) { r->reachable = TRUE; r->replyCount = 0; return 0; }
     HANDLE h = IcmpCreateFile();
     if (h == INVALID_HANDLE_VALUE) { r->reachable = TRUE; r->replyCount = PING_COUNT; return 1; }
     unsigned char data[32] = {0};
@@ -155,6 +164,7 @@ static DWORD WINAPI WorkerThread(LPVOID param) {
     AppendLog(L"掩码: %d.%d.%d.%d\r\n", MASK0, MASK1, MASK2, MASK3);
     AppendLog(L"网关: %d.%d.%d.%d\r\n", GW0, GW1, GW2, GW3);
     AppendLog(L"DNS:  %d.%d.%d.%d\r\n", DNS0, DNS1, DNS2, DNS3);
+    AppendLog(L"探测: ARP + ping%d包 (任一有响应即视为占用)\r\n", PING_COUNT);
     AppendLog(L"验证: ping百度%d包, 全通才算成功\r\n", VERIFY_COUNT);
     AppendLog(L"\r\n");
 
@@ -185,6 +195,8 @@ static DWORD WINAPI WorkerThread(LPVOID param) {
             sprintf(ipBuf, "%d.%d.%d.%d", IP0, IP1, IP2, last);
             results[i].ip = inet_addr(ipBuf);
             results[i].reachable = TRUE;
+            results[i].replyCount = 0;
+            results[i].arpAlive = 0;
             results[i].lastOctet = last;
             threads[i] = CreateThread(NULL, 0, PingThread, &results[i], 0, NULL);
             if (!threads[i]) results[i].reachable = TRUE;
@@ -192,7 +204,7 @@ static DWORD WINAPI WorkerThread(LPVOID param) {
             AppendLog(L"  候选%d: %d.%d.%d.%d\r\n", i + 1, IP0, IP1, IP2, last);
         }
 
-        AppendLog(L"\r\n正在并发Ping (每个IP发%d包, 间隔%dms, 超时%dms)...\r\n\r\n", PING_COUNT, PING_INTERVAL, PING_TIMEOUT);
+        AppendLog(L"\r\n正在并发探测 (ARP + 每个IP发%d包, 间隔%dms, 超时%dms)...\r\n\r\n", PING_COUNT, PING_INTERVAL, PING_TIMEOUT);
 
         int vc = 0;
         HANDLE vh[NUM_CANDIDATES];
@@ -204,10 +216,11 @@ static DWORD WINAPI WorkerThread(LPVOID param) {
             if (threads[i]) CloseHandle(threads[i]);
         }
 
-        AppendLog(L"Ping结果:\r\n");
+        AppendLog(L"探测结果:\r\n");
         for (int i = 0; i < NUM_CANDIDATES; i++) {
-            AppendLog(L"  %d.%d.%d.%d -> 收到%d/%d %s\r\n",
+            AppendLog(L"  %d.%d.%d.%d -> ARP:%s  Ping:%d/%d  %s\r\n",
                 IP0, IP1, IP2, candidates[i],
+                results[i].arpAlive ? L"有应答" : L"无应答",
                 results[i].replyCount, PING_COUNT,
                 results[i].reachable ? L"(被占用)" : L"(空闲)");
         }
@@ -340,6 +353,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize = sizeof(wc);

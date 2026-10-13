@@ -118,6 +118,7 @@ void PingWorker::run() {
     emit logMessage(QString("掩码: %1.%2.%3.%4").arg(MASK0).arg(MASK1).arg(MASK2).arg(MASK3), "#a0a0a0");
     emit logMessage(QString("网关: %1.%2.%3.%4").arg(GW0).arg(GW1).arg(GW2).arg(GW3), "#a0a0a0");
     emit logMessage(QString("DNS:  %1.%2.%3.%4").arg(DNS0).arg(DNS1).arg(DNS2).arg(DNS3), "#a0a0a0");
+    emit logMessage(QString("探测: ARP + ping%1包 (任一有响应即视为占用)").arg(PING_COUNT), "#a0a0a0");
     emit logMessage(QString("验证: ping百度%1包, 全通才算成功").arg(VERIFY_COUNT), "#a0a0a0");
     emit logMessage("", "#a0a0a0");
 
@@ -134,7 +135,7 @@ void PingWorker::run() {
         emit progress(round * 20, QString("第%1轮").arg(round + 1));
         emit logMessage(QString("[第%1轮] 随机生成5个候选IP:").arg(round + 1), "#fbbf24");
 
-        struct Cand { DWORD ip; int last; bool reachable; int replies; };
+        struct Cand { DWORD ip; int last; bool reachable; int replies; bool arpAlive; };
         Cand cands[NUM_CANDIDATES];
         QList<int> candidates;
 
@@ -150,17 +151,22 @@ void PingWorker::run() {
             cands[i].last = last;
             cands[i].reachable = true;
             cands[i].replies = 0;
+            cands[i].arpAlive = false;
 
             emit logMessage(QString("  候选%1: %2.%3.%4.%5").arg(i + 1).arg(IP0).arg(IP1).arg(IP2).arg(last), "#a0a0a0");
         }
 
-        emit logMessage(QString("\n正在并发Ping (每个IP发%1包, 间隔%2ms, 超时%3ms)...").arg(PING_COUNT).arg(PING_INTERVAL).arg(PING_TIMEOUT), "#a0a0a0");
-        emit progress(round * 20 + 5, "Ping候选IP...");
+        emit logMessage(QString("\n正在并发探测 (ARP + 每个IP发%1包, 间隔%2ms, 超时%3ms)...").arg(PING_COUNT).arg(PING_INTERVAL).arg(PING_TIMEOUT), "#a0a0a0");
+        emit progress(round * 20 + 5, "探测候选IP...");
 
         QList<QThread*> threads;
         struct PingArg { Cand *c; bool *cancelled; };
         for (int i = 0; i < NUM_CANDIDATES; i++) {
             auto t = QThread::create([&, i]() {
+                ULONG mac[2] = {0, 0};
+                ULONG macLen = 6;
+                cands[i].arpAlive = (SendARP(cands[i].ip, 0, mac, &macLen) == NO_ERROR);
+                if (cands[i].arpAlive) { cands[i].reachable = true; cands[i].replies = 0; return; }
                 HANDLE h = IcmpCreateFile();
                 if (h == INVALID_HANDLE_VALUE) { cands[i].reachable = true; cands[i].replies = PING_COUNT; return; }
                 unsigned char data[32] = {0};
@@ -183,12 +189,13 @@ void PingWorker::run() {
         }
         for (auto *t : threads) { t->wait(60000); delete t; }
 
-        emit logMessage("Ping结果:", "#a0a0a0");
+        emit logMessage("探测结果:", "#a0a0a0");
         for (int i = 0; i < NUM_CANDIDATES; i++) {
             QString status = cands[i].reachable ? "(被占用)" : "(空闲)";
             QString color = cands[i].reachable ? "#f87171" : "#4ade80";
-            emit logMessage(QString("  %1.%2.%3.%4 -> 收到%5/%6 %7")
+            emit logMessage(QString("  %1.%2.%3.%4 -> ARP:%5  Ping:%6/%7  %8")
                 .arg(IP0).arg(IP1).arg(IP2).arg(cands[i].last)
+                .arg(cands[i].arpAlive ? "有应答" : "无应答")
                 .arg(cands[i].replies).arg(PING_COUNT).arg(status), color);
         }
 
