@@ -120,11 +120,11 @@ void PingWorker::run() {
     emit logMessage(QString("掩码: %1.%2.%3.%4").arg(MASK0).arg(MASK1).arg(MASK2).arg(MASK3), "#a0a0a0");
     emit logMessage(QString("网关: %1.%2.%3.%4").arg(GW0).arg(GW1).arg(GW2).arg(GW3), "#a0a0a0");
     emit logMessage(QString("DNS:  %1.%2.%3.%4").arg(DNS0).arg(DNS1).arg(DNS2).arg(DNS3), "#a0a0a0");
-    emit logMessage(QString("探测: ARP + ping%1包 (任一有响应即视为占用)").arg(PING_COUNT), "#a0a0a0");
+    emit logMessage(QString("探测: 每个地址 ping%1包 (有响应即视为占用)").arg(PING_COUNT), "#a0a0a0");
     emit logMessage(QString("验证: ping百度%1包, 全通才算成功").arg(VERIFY_COUNT), "#a0a0a0");
     emit logMessage("", "#a0a0a0");
 
-    struct Cand { DWORD ip; int last; bool reachable; int replies; bool arpAlive; };
+    struct Cand { DWORD ip; int last; bool reachable; int replies; };
     const int total = SCAN_LAST - SCAN_FIRST + 1;
     std::vector<Cand> cands(total);
 
@@ -142,16 +142,11 @@ void PingWorker::run() {
         cands[i].last = last;
         cands[i].reachable = true;
         cands[i].replies = 0;
-        cands[i].arpAlive = false;
     }
 
     QList<QThread*> threads;
     for (int i = 0; i < total; i++) {
         auto t = QThread::create([&cands, i]() {
-            ULONG mac[2] = {0, 0};
-            ULONG macLen = 6;
-            cands[i].arpAlive = (SendARP(cands[i].ip, 0, mac, &macLen) == NO_ERROR);
-            if (cands[i].arpAlive) { cands[i].reachable = true; cands[i].replies = 0; return; }
             HANDLE h = IcmpCreateFile();
             if (h == INVALID_HANDLE_VALUE) { cands[i].reachable = true; cands[i].replies = PING_COUNT; return; }
             unsigned char data[32] = {0};
