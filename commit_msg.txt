@@ -1,0 +1,9 @@
+AutoIP: 标准化仓库结构, 添加 Qt 版本和文档
+
+- 纯 C 版本: 单文件 exe, Win32 原生 UI
+- Qt 6 版本: 深色主题美化 UI, CMake 构建
+- 每个候选 IP ping 5 包检测空闲
+- 设好 IP 后 ping 百度 10 包验证稳定性
+- 有丢包自动切换下一个 IP
+- UAC 自动提权, 无黑色 cmd 窗口
+- README, LICENSE (MIT), .gitignore

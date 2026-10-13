@@ -1,0 +1,30 @@
+# Build artifacts
+*.obj
+*.res
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.dll
+
+# CMake build
+AutoIPQt/build/
+
+# Qt deploy
+AutoIP_qt/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln.docstates
+
+# Temporary
+*.tmp
+*.bak
+*~
+
+# Thumbnails
+Thumbs.db

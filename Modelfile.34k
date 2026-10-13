@@ -1,2 +1,0 @@
-﻿FROM qwen3-agent-28k
-PARAMETER num_ctx 34816
