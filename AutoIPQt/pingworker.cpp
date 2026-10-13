@@ -21,7 +21,7 @@
 #define PING_COUNT 5
 #define PING_TIMEOUT 2000
 #define PING_INTERVAL 500
-#define VERIFY_COUNT 10
+#define VERIFY_COUNT 5
 #define VERIFY_TIMEOUT 3000
 #define VERIFY_INTERVAL 1000
 
@@ -104,7 +104,7 @@ int PingWorker::verifyBaidu() {
         if (m_cancelled) break;
         DWORD ret = IcmpSendEcho(h, baiduIp, data, sizeof(data), NULL, buf, replySize, VERIFY_TIMEOUT);
         if (ret > 0) got++;
-        emit progress(70 + (i + 1) * 3, QString("验证百度 %1/%2").arg(i + 1).arg(VERIFY_COUNT));
+        emit progress(70 + (i + 1) * (30 / VERIFY_COUNT), QString("验证百度 %1/%2").arg(i + 1).arg(VERIFY_COUNT));
         if (i < VERIFY_COUNT - 1) Sleep(VERIFY_INTERVAL);
     }
 
