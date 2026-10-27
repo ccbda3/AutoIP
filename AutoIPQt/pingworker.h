@@ -44,7 +44,7 @@ private:
     bool arpProbe(DWORD ip, BYTE mac[6]);
     int  pingCount(DWORD ip, int count, int timeoutMs, int intervalMs);
     bool queryAdapter(const QString &name, DWORD &ifIndex, BYTE mac[8], ULONG &macLen);
-    void purgeNeighborCache(DWORD ifIndex, int first, int last);
+    void purgeNeighbor(DWORD ifIndex, DWORD ip);
 
     // --- 配置与验证 ---
     bool runNetsh(const QString &cmd);

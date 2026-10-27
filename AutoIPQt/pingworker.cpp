@@ -12,6 +12,7 @@
 #include <QStringList>
 #include <QVector>
 #include <QList>
+#include <QSet>
 #include <QRandomGenerator>
 #include <QElapsedTimer>
 #include <atomic>
@@ -30,14 +31,17 @@ static const int MASK0 = 255, MASK1 = 255, MASK2 = 254, MASK3 = 0;
 static const int GW0 = 10, GW1 = 172, GW2 = 201, GW3 = 254;
 static const int DNS0 = 10, DNS1 = 1, DNS2 = 0, DNS3 = 62;
 
-// ---- 扫描 ----
-// 并发降到 48：253 个同时发 ARP 会把小交换机的广播队列打满
-#define SCAN_WORKERS 48
+// ---- 探测策略 ----
+// 不再全段扫描：教室网关会替全网段代答 ARP，而且有速率限制。
+// 253 个并发打过去会被丢包，实测漏判近一半（该占用的被判成空闲）。
+// 改为每批随机抽 10 个，探完有空的就用，全被占用再抽下一批。
+// 段内空闲率约 52% 时，一批全占的概率约 0.065%，基本不会空手。
+#define BATCH_SIZE 10
+#define MAX_BATCHES 8    // 最多抽 80 个地址
+#define MAX_ATTEMPTS 10  // 最多真正配置 10 次，防止无限重试
 // ARP 无响应时补一次 ping，只为兜住「跨网段 / 代理 ARP」的少数情况
 #define PING_FALLBACK_COUNT 1
 #define PING_FALLBACK_TIMEOUT 800
-// 占用率超过这个比例就提示可能是缓存污染，不是真的这么满
-#define OCCUPANCY_WARN_RATIO 0.95
 
 // ---- 配置生效等待 ----
 // netsh 返回成功不代表地址已经落到网卡上，先轮询等它出现
@@ -154,24 +158,16 @@ bool PingWorker::queryAdapter(const QString &name, DWORD &ifIndex, BYTE mac[8], 
 }
 
 // 关键修复：SendARP 会先查本机邻居表，命中就返回旧 MAC 且一个包都不发。
-// 教室机器频繁开关机，表里全是陈旧条目，会把大量空闲地址误判成占用。
-// 所以扫描前必须先把整段的动态邻居条目清掉，逼它真的发 ARP。
-void PingWorker::purgeNeighborCache(DWORD ifIndex, int first, int last) {
-    if (ifIndex == 0) {
-        emit logMessage("警告: 未取到适配器索引, 跳过邻居缓存清理", "#fbbf24");
-        return;
-    }
+// 教室机器频繁开关机，表里全是陈旧条目，会把空闲地址误判成占用。
+// 所以每个地址探测前先删掉它的缓存条目，逼它真的发 ARP。
+void PingWorker::purgeNeighbor(DWORD ifIndex, DWORD ip) {
+    if (ifIndex == 0) return;
 
     MIB_IPNET_ROW2 row{};
     row.InterfaceIndex = ifIndex;
     row.Address.si_family = AF_INET;
-
-    int removed = 0;
-    for (int i = first; i <= last; ++i) {
-        row.Address.Ipv4.sin_addr.s_addr = ipOf(i);
-        if (DeleteIpNetEntry2(&row) == NO_ERROR) removed++;
-    }
-    emit logMessage(QString("清理邻居缓存: 移除 %1 条陈旧记录").arg(removed), "#a0a0a0");
+    row.Address.Ipv4.sin_addr.s_addr = ip;
+    DeleteIpNetEntry2(&row);
 }
 
 bool PingWorker::arpProbe(DWORD ip, BYTE mac[6]) {
@@ -441,6 +437,7 @@ void PingWorker::run() {
     emit logMessage(QString("网关: %1.%2.%3.%4").arg(GW0).arg(GW1).arg(GW2).arg(GW3), "#a0a0a0");
     emit logMessage(QString("DNS:  %1.%2.%3.%4").arg(DNS0).arg(DNS1).arg(DNS2).arg(DNS3), "#a0a0a0");
     emit logMessage(QString("探测: ARP 为主, ping%1包兜底 (任一有响应即视为占用)").arg(PING_FALLBACK_COUNT), "#a0a0a0");
+    emit logMessage(QString("策略: 每批随机抽 %1 个地址, 有空闲的就试, 全占用再抽下一批").arg(BATCH_SIZE), "#a0a0a0");
     emit logMessage(QString("等待: 地址生效后主动检查 链路/地址DAD/路由/网关ARP, 全就绪才测丢包"), "#a0a0a0");
     emit logMessage(QString("验证: 网关%1包 → 外网%2包").arg(GW_CHECK_COUNT).arg(VERIFY_COUNT), "#a0a0a0");
     emit logMessage("", "#a0a0a0");
@@ -457,132 +454,108 @@ void PingWorker::run() {
     }
     emit logMessage(QString("适配器索引: %1").arg(ifIndex), "#a0a0a0");
 
-    // 先清缓存，否则下面全是读缓存得到的假结果
-    purgeNeighborCache(ifIndex, SCAN_FIRST, SCAN_LAST);
-
-    struct Cand {
-        DWORD ip;
-        int last;
-        bool occupied;
-        bool arpOk;
-        int replies;
-        BYTE mac[6];
-    };
-
-    const int total = SCAN_LAST - SCAN_FIRST + 1;
-    std::vector<Cand> cands(total);
-    for (int i = 0; i < total; ++i) {
-        cands[i].ip = ipOf(SCAN_FIRST + i);
-        cands[i].last = SCAN_FIRST + i;
-        cands[i].occupied = true;
-        cands[i].arpOk = false;
-        cands[i].replies = 0;
-        memset(cands[i].mac, 0, 6);
-    }
-
-    emit progress(10, QString("ARP 扫描 %1 个地址...").arg(total));
-    emit logMessage(QString("并发扫描 %1.%2.%3.%4 - %5.%6.%7.%8 (共%9个地址, %10 并发)...")
-                        .arg(IP0).arg(IP1).arg(IP2).arg(SCAN_FIRST)
-                        .arg(IP0).arg(IP1).arg(IP2).arg(SCAN_LAST)
-                        .arg(total).arg(SCAN_WORKERS),
-                    "#fbbf24");
-
-    std::atomic<int> nextIndex{0};
-    std::atomic<int> finished{0};
-    QList<QThread *> pool;
-
-    int workers = SCAN_WORKERS < total ? SCAN_WORKERS : total;
-    for (int w = 0; w < workers; ++w) {
-        pool.append(QThread::create([this, &cands, &nextIndex, &finished, total]() {
-            for (;;) {
-                if (m_cancelled.load()) break;
-                int i = nextIndex.fetch_add(1);
-                if (i >= total) break;
-
-                BYTE mac[6] = {0};
-                if (arpProbe(cands[i].ip, mac)) {
-                    cands[i].occupied = true;
-                    cands[i].arpOk = true;
-                    memcpy(cands[i].mac, mac, 6);
-                } else {
-                    // ARP 没应答再补 ping，兜住跨网段/代理 ARP 的情况
-                    int r = pingCount(cands[i].ip, PING_FALLBACK_COUNT, PING_FALLBACK_TIMEOUT, 0);
-                    cands[i].replies = r;
-                    // -1 说明 ICMP 句柄都建不起来，按占用保守处理
-                    cands[i].occupied = (r != 0);
-                }
-
-                int doneCount = finished.fetch_add(1) + 1;
-                if (doneCount % 16 == 0 || doneCount == total) {
-                    emit progress(10 + doneCount * 50 / total,
-                                  QString("扫描中 %1/%2").arg(doneCount).arg(total));
-                }
-            }
-        }));
-    }
-
-    for (auto *t : pool) t->start();
-    for (auto *t : pool) { t->wait(); delete t; }
-
-    if (m_cancelled.load()) {
-        emit progress(100, "已取消");
-        emit done(false);
-        return;
-    }
-
-    int occupied = 0;
-    int arpCount = 0;
-    QVector<int> freeLasts;
-    for (int i = 0; i < total; ++i) {
-        if (cands[i].occupied) {
-            occupied++;
-            if (cands[i].arpOk) arpCount++;
-        } else {
-            freeLasts.append(cands[i].last);
-        }
-    }
-
-    const int freeCount = static_cast<int>(freeLasts.size());
-
-    emit progress(62, "扫描完成");
-    emit logMessage(QString("扫描完成: 共%1个地址, 被占用 %2 个 (ARP 确认 %3 个), 空闲 %4 个")
-                        .arg(total).arg(occupied).arg(arpCount).arg(freeCount),
-                    "#a0a0a0");
-
-    // 一个教室不可能几乎全满，占用率异常高基本就是判定出了问题
-    if (occupied > total * OCCUPANCY_WARN_RATIO) {
-        emit logMessage("警告: 占用率异常高, 可能仍有缓存污染, 建议重试一次", "#fbbf24");
-    }
-
-    if (freeLasts.isEmpty()) {
-        emit logMessage("\n*** 全段地址均被占用, 请稍后重试 ***", "#f87171");
-        emit progress(100, "失败");
-        emit done(false);
-        return;
-    }
-
-    QStringList listed;
-    int show = freeCount < 40 ? freeCount : 40;
-    for (int i = 0; i < show; ++i)
-        listed << QString("%1.%2.%3.%4").arg(IP0).arg(IP1).arg(IP2).arg(freeLasts[i]);
-    emit logMessage(QString("空闲地址(前%1个): %2").arg(show).arg(listed.join("  ")), "#4ade80");
-    emit logMessage("", "#a0a0a0");
-
-    for (int i = freeCount - 1; i > 0; --i) {
-        int j = QRandomGenerator::global()->bounded(i + 1);
-        int tmp = freeLasts[i];
-        freeLasts[i] = freeLasts[j];
-        freeLasts[j] = tmp;
-    }
-
+    QSet<int> probed;
+    QVector<int> queue;
+    int batch = 0;
+    int attempts = 0;
     bool success = false;
     int finalLast = 0;
     DWORD gwIp = gatewayIp();
 
-    for (int idx = 0; idx < freeCount && !success; ++idx) {
+    while (!success && attempts < MAX_ATTEMPTS) {
         if (m_cancelled.load()) break;
 
-        int tryLast = freeLasts[idx];
+        // 队列空了就抽新的一批
+        if (queue.isEmpty()) {
+            if (batch >= MAX_BATCHES) {
+                emit logMessage(QString("\n*** 已抽满 %1 批仍无可用地址 ***").arg(MAX_BATCHES), "#f87171");
+                break;
+            }
+            ++batch;
+
+            QVector<int> picks;
+            int guard = 0;
+            const int span = SCAN_LAST - SCAN_FIRST + 1;
+            while (picks.size() < BATCH_SIZE && guard++ < 5000) {
+                int last = SCAN_FIRST + int(QRandomGenerator::global()->bounded(span));
+                if (probed.contains(last)) continue;
+                probed.insert(last);
+                picks.append(last);
+            }
+            if (picks.isEmpty()) break;
+
+            emit logMessage(QString("\n--- 第 %1 批: 随机抽取 %2 个地址 ---").arg(batch).arg(picks.size()),
+                            "#60a5fa");
+            emit progress(12, QString("探测第 %1 批").arg(batch));
+
+            struct Pick {
+                DWORD ip;
+                int last;
+                bool occupied;
+                BYTE mac[6];
+            };
+
+            std::vector<Pick> items(static_cast<size_t>(picks.size()));
+            for (int i = 0; i < static_cast<int>(picks.size()); ++i) {
+                items[i].ip = ipOf(picks[i]);
+                items[i].last = picks[i];
+                items[i].occupied = true;
+                memset(items[i].mac, 0, 6);
+            }
+
+            // 只探这 10 个，并发 10，量小不会被网关限速
+            QList<QThread *> ts;
+            for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+                ts.append(QThread::create([this, &items, i, ifIndex]() {
+                    purgeNeighbor(ifIndex, items[i].ip);
+                    BYTE mac[6] = {0};
+                    if (arpProbe(items[i].ip, mac)) {
+                        items[i].occupied = true;
+                        memcpy(items[i].mac, mac, 6);
+                    } else {
+                        // ARP 没应答再补 1 包 ping，兜住 ARP 静默的主机
+                        int r = pingCount(items[i].ip, PING_FALLBACK_COUNT, PING_FALLBACK_TIMEOUT, 0);
+                        // -1 说明 ICMP 句柄都建不起来，按占用保守处理
+                        items[i].occupied = (r != 0);
+                    }
+                }));
+            }
+            for (auto *t : ts) t->start();
+            for (auto *t : ts) { t->wait(); delete t; }
+
+            if (m_cancelled.load()) break;
+
+            QStringList detail;
+            for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+                if (items[i].occupied) {
+                    detail << QString(".%1 占").arg(items[i].last);
+                } else {
+                    queue.append(items[i].last);
+                    detail << QString(".%1 空").arg(items[i].last);
+                }
+            }
+            emit logMessage(QString("  结果: %1").arg(detail.join("  ")), "#a0a0a0");
+            emit logMessage(QString("  本批空闲 %1/%2").arg(queue.size()).arg(items.size()),
+                            queue.isEmpty() ? "#fbbf24" : "#4ade80");
+
+            if (queue.isEmpty()) {
+                emit logMessage("  本批全被占用, 抽下一批", "#fbbf24");
+                continue;
+            }
+
+            // 洗牌，避免总是先试最小的那个
+            const int qn = static_cast<int>(queue.size());
+            for (int i = qn - 1; i > 0; --i) {
+                int j = QRandomGenerator::global()->bounded(i + 1);
+                int tmp = queue[i];
+                queue[i] = queue[j];
+                queue[j] = tmp;
+            }
+            emit progress(18, QString("第 %1 批待试 %2 个").arg(batch).arg(queue.size()));
+        }
+
+        int tryLast = queue.takeFirst();
+        ++attempts;
         DWORD tryIp = ipOf(tryLast);
         QString tryStr = ipToString(tryIp);
 
