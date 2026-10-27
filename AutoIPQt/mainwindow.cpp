@@ -52,10 +52,7 @@ void MainWindow::setupUI() {
         "  font-size: 12px;"
         "}"
     );
-    m_infoLabel->setText(
-        "适配器: 以太网  |  IP段: 10.172.201.x  |  掩码: 255.255.254.0\n"
-        "网关: 10.172.201.254  |  DNS: 10.1.0.62"
-    );
+    m_infoLabel->setText(PingWorker::configSummary());
     layout->addWidget(m_infoLabel);
 
     m_log = new QTextEdit(this);
