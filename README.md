@@ -81,6 +81,9 @@ AutoIPQt/
   autoip.qrc        图标资源
   autoip.rc         图标引用
   autoip.ico        应用图标
+
+tools/
+  scan_net.py       独立的网段探测脚本，手动查哪些 IP 空着
 ```
 
 ## 编译
@@ -104,6 +107,23 @@ windeployqt --release --no-translations --no-opengl-sw AutoIP.exe
 ```
 
 双击运行时会自动弹出 UAC 申请管理员权限（`netsh` 改 IP 需要）。
+
+## 探测工具
+
+`tools/scan_net.py` 是独立的网段探测脚本，判定逻辑与程序完全一致（清邻居缓存 → ARP → ICMP 兜底），用来手动确认某个网段当前哪些地址空着，或验证程序判定是否可靠。
+
+```bash
+# 全段扫描（低并发，准但慢）
+python tools/scan_net.py
+
+# 批次抽样（与程序策略一致，快）
+python tools/scan_net.py --rounds 5
+
+# 换网段 / 调并发
+python tools/scan_net.py --net 10.172.201 --first 1 --last 253 --workers 6
+```
+
+`--workers` 别调太高。有些教室网关会替全网段代答 ARP 且有速率限制，并发一高就丢包，把在用的地址判成空闲——这正是程序放弃全段扫描、改成每批 10 个的原因。
 
 ## 许可证
 
